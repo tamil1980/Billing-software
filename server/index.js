@@ -1,0 +1,16 @@
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import mysql from 'mysql2/promise';
+dotenv.config();
+const app = express(); app.use(cors()); app.use(express.json());
+const pool = mysql.createPool({ host: process.env.DB_HOST || 'localhost', user: process.env.DB_USER || 'root', password: process.env.DB_PASSWORD || '', database: process.env.DB_NAME || 'ledgerly', waitForConnections:true, connectionLimit:10 });
+app.get('/api/health', async (_,res)=>{ try { await pool.query('SELECT 1'); res.json({status:'ok'}); } catch { res.json({status:'database not connected'}); }});
+app.get('/api/items', async (_,res)=>{ const [rows] = await pool.query('SELECT * FROM items ORDER BY name'); res.json(rows); });
+app.post('/api/items', async (req,res)=>{ const {name,sku,category,price,stock}=req.body; const [r]=await pool.query('INSERT INTO items (name,sku,category,price,stock) VALUES (?,?,?,?,?)',[name,sku,category,price,stock]); res.status(201).json({id:r.insertId}); });
+app.get('/api/suppliers', async (_,res)=>{ const [rows] = await pool.query('SELECT * FROM suppliers ORDER BY name'); res.json(rows); });
+app.post('/api/suppliers', async (req,res)=>{ const {name,email,phone,address}=req.body; const [r]=await pool.query('INSERT INTO suppliers (name,email,phone,address) VALUES (?,?,?,?)',[name,email,phone,address]); res.status(201).json({id:r.insertId}); });
+app.get('/api/invoices', async (req,res)=>{ const {from,to}=req.query; let q='SELECT * FROM invoices'; const args=[]; if(from&&to){q+=' WHERE invoice_date BETWEEN ? AND ?';args.push(from,to)} const [rows]=await pool.query(q+' ORDER BY invoice_date DESC',args);res.json(rows); });
+app.get('/api/invoices/:id', async (req,res)=>{ const [[invoice]] = await pool.query('SELECT i.*, COALESCE(i.supplier_address,s.address) AS supplier_address, COALESCE(i.supplier_phone,s.phone) AS supplier_phone FROM invoices i LEFT JOIN suppliers s ON s.name=i.supplier_name WHERE i.id=?',[req.params.id]); if(!invoice) return res.status(404).json({error:'Invoice not found'}); const [items] = await pool.query('SELECT ii.item_id, ii.quantity, ii.unit_price, i.name FROM invoice_items ii JOIN items i ON i.id=ii.item_id WHERE ii.invoice_id=?',[req.params.id]); res.json({...invoice,items}); });
+app.post('/api/invoices', async (req,res)=>{ const {invoice_no,customer_name,supplier_name='',supplier_address='',supplier_phone='',invoice_date,items,total,status='Pending',gst_rate=18}=req.body; const conn=await pool.getConnection(); try { await conn.beginTransaction(); const [r]=await conn.query('INSERT INTO invoices (invoice_no,customer_name,supplier_name,supplier_address,supplier_phone,invoice_date,gst_rate,total,status) VALUES (?,?,?,?,?,?,?,?,?)',[invoice_no,customer_name,supplier_name,supplier_address,supplier_phone,invoice_date,gst_rate,total,status]); for(const x of items) { await conn.query('INSERT INTO invoice_items (invoice_id,item_id,quantity,unit_price) VALUES (?,?,?,?)',[r.insertId,x.itemId,x.quantity,x.unitPrice]); await conn.query('UPDATE items SET stock=GREATEST(stock - ?, 0) WHERE id=?',[x.quantity,x.itemId]); } await conn.commit();res.status(201).json({id:r.insertId}); } catch(e){await conn.rollback();res.status(400).json({error:e.message});} finally{conn.release()} });
+app.listen(process.env.PORT || 5000,()=>console.log('API listening on port 5000'));
